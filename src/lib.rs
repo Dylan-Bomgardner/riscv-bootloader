@@ -11,10 +11,17 @@ mod emu;
 /*
 	Idk Stuff Here ;)
  */
-use core::{arch::{asm}, panic::PanicInfo};
+use core::{arch::asm, convert::Infallible, panic::PanicInfo};
 use dev::uart::Uart;
 use srv::console::Console;
 use dev::pci;
+use embedded_graphics::{
+    mono_font::{ascii::FONT_7X14, MonoTextStyleBuilder},
+    pixelcolor::Rgb888,
+    prelude::*,
+    primitives::{Circle, PrimitiveStyle},
+    text::Text,
+};
 /*
 	Globals
 */
@@ -80,7 +87,72 @@ fn get_dts() -> u64 {
 	println!("device tree at: {:X}", value);
 	return value;
 }
+pub struct Mode13Display {
+    base: *mut u8,
+}
 
+impl Mode13Display {
+    #[inline]
+    pub unsafe fn new(base: *mut u8) -> Self {
+        Self { base }
+    }
+
+    #[inline(always)]
+    fn _color_component_to_safe_color(c: u8) -> u8 {
+        const TABLE: [u8; 256] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+            3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+            4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5,
+            5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+        ];
+        TABLE[c as usize]
+    }
+
+    pub fn set_pixel(&mut self, coord: Point, color: Rgb888) -> Option<()> {
+        if let Ok((x @ 0..=319, y @ 0..=199)) = coord.try_into() {
+            let index = x as usize + y as usize * 320;
+
+            let r = Self::_color_component_to_safe_color(color.r());
+            let g = Self::_color_component_to_safe_color(color.g());
+            let b = Self::_color_component_to_safe_color(color.b());
+            let color = 16 + r + g * 6 + b * 36;
+
+            unsafe {
+                self.base.add(index).write_volatile(color);
+            }
+
+            Some(())
+        } else {
+            None
+        }
+    }
+}
+
+impl DrawTarget for Mode13Display {
+    type Color = Rgb888;
+    type Error = Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        for Pixel(coord, color) in pixels.into_iter() {
+            self.set_pixel(coord, color);
+        }
+        Ok(())
+    }
+}
+
+impl OriginDimensions for Mode13Display {
+    fn size(&self) -> Size {
+        Size::new(320, 200)
+    }
+}
 #[no_mangle]
 extern "C"
 fn kmain() {
@@ -90,23 +162,45 @@ fn kmain() {
 	// let kconsole: Console = Console::new(kernel_uart);
 	println!("Hello, World!");
 	//printsizeof PCIHeader0
-	println!("Size of PCIHeader0: {}", core::mem::size_of::<pci::PCIHeader0>());
-	let pci = pci::PCIHeader0::get(0, 1);
-	println!("Vendor ID: {:#X}", pci.header.vendor_id());
-	println!("Device ID: {:#X}", pci.header.device_id());
-	//print out address
-	println!("Subsytem Vendor ID: {:#X}", pci.subsystem_vendor_id);
-	println!("Subsytem ID: {:#X}", pci.subsystem_id);
-	println!("Interrupt Line: {:#X}", pci.interrupt_line);
-	println!("Interrupt Pin: {:#X}", pci.interrupt_pin);
-	println!("Expansion ROM Base Address: {:#X}", pci.expansion_rom_base_address as u32);
+	println!("Size of PCIHeader0: {}", core::mem::size_of::<pci::PCIDevice>());
+	let pci = pci::PCIDevice::get(0, 1);
+	println!("Vendor ID: {:#X}", pci.header.vendor_id);
+	println!("Device ID: {:#X}", pci.header.device_id);
+	println!("Class Code: {:#X}", pci.header.class_code);
+	println!("Subclass: {:#X}", pci.header.subclass);
+	println!("Address Range: {:#X}", pci.address_range);
+	//check the first outside the address range
+	// pci.header.command().set_memory_space(true);
 	unsafe {
-		let cap = pci.capabilities_head as *const pci::PCICapabilitiesList;
-		println!("Capabilities Head: {:#X}", (*cap).capability_id());
-		println!("Capabilities Next: {:#X}", (*cap).next());
-		let next = pci.base_address.add((*cap).next() as usize) as *const pci::PCICapabilitiesList;
-		println!("Capabilities Next: {:#X}", (*next).capability_id());
+	println!("Address {:#X}", pci.read(0x10));
 	}
+	//print out address
+	for i in 0..6 {
+		println!("BAR{}: {:#X}", i, pci.bar_read(i));
+	}
+	//try to find bochs version
+	unsafe 
+	{
+		println!("Bochs Version: {:#X}", pci.bar_read(0x08));
+	}
+
+	let vga = dev::vga::VGA::new(0, 1).unwrap();
+	unsafe {
+		vga.set_mode13();
+	}
+	let mut display = unsafe { Mode13Display::new(vga.fb) };
+
+    Text::new(
+        "Hello, world!",
+        Point::new(4, 18),
+        MonoTextStyleBuilder::new()
+            .font(&FONT_7X14)
+            .text_color(Rgb888::WHITE)
+            .build(),
+    )
+    .draw(&mut display)
+    .unwrap();
+
 	//read the value back
 	// println!("Vendor ID: {:#X}", result);/
 	// kconsole.listen();
